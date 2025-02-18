@@ -1,39 +1,43 @@
-SET statement_timeout = 0;
-SET lock_timeout = 0;
-SET idle_in_transaction_session_timeout = 0;
-SET client_encoding = 'UTF8';
-SET standard_conforming_strings = on;
-SELECT pg_catalog.set_config('search_path', '', false);
-SET check_function_bodies = false;
-SET xmloption = content;
-SET client_min_messages = warning;
-SET row_security = off;
+do $$
+begin
+raise notice 'Запускаем создание новой структуры базы данных meteo'; 
+begin
 
-DROP SCHEMA IF EXISTS yulya CASCADE;
-DROP FUNCTION IF EXISTS yulya."fnHeaderGetPressure"();
-DROP FUNCTION IF EXISTS yulya."fnHeaderGetPressure"(pressure numeric);
-DROP FUNCTION IF EXISTS yulya."getDate"();
-DROP FUNCTION IF EXISTS yulya."getHeight"(height integer);
-DROP FUNCTION IF EXISTS yulya."getBBBTT"(measurement_id integer);
-DROP FUNCTION IF EXISTS yulya.interpolation();
-DROP FUNCTION IF EXISTS yulya.interpolation(temp numeric);
-DROP FUNCTION IF EXISTS yulya.new_data_type(temp numeric, pres numeric, wind numeric);
-DROP TYPE IF EXISTS yulya.interpolation_type;
-DROP TYPE IF EXISTS yulya.send_params;
-DROP TABLE IF EXISTS yulya.calc_temperatures_correction;
-DROP TABLE IF EXISTS yulya.const;
-DROP TABLE IF EXISTS yulya.measure_settings;
-DROP TABLE IF EXISTS yulya.measurment_baths;
-DROP TABLE IF EXISTS yulya.measurment_input_params;
-DROP TABLE IF EXISTS yulya.measurment_types;
-DROP TABLE IF EXISTS yulya.military_ranks CASCADE;
-DROP TABLE IF EXISTS yulya.employees CASCADE;
-DROP SEQUENCE IF EXISTS yulya.employees_seq;
-DROP SEQUENCE IF EXISTS yulya.measure_settings_seq;
-DROP SEQUENCE IF EXISTS yulya.measurment_baths_seq;
-DROP SEQUENCE IF EXISTS yulya.measurment_input_params_seq;
-DROP SEQUENCE IF EXISTS yulya.measurment_types_seq;
-DROP SEQUENCE IF EXISTS yulya.military_ranks_seq;
+/*
+ 1. Удаляем старые элементы
+ ======================================
+ */
+
+    DROP SCHEMA IF EXISTS yulya CASCADE;
+    DROP FUNCTION IF EXISTS yulya."fnHeaderGetPressure"();
+    DROP FUNCTION IF EXISTS yulya."fnHeaderGetPressure"(pressure numeric);
+    DROP FUNCTION IF EXISTS yulya."getDate"();
+    DROP FUNCTION IF EXISTS yulya."getHeight"(height integer);
+    DROP FUNCTION IF EXISTS yulya."getBBBTT"(params yulya.send_params);
+    DROP FUNCTION IF EXISTS yulya."calculate_interpolation"(var_temperature integer);
+    DROP TYPE IF EXISTS yulya.interpolation_type;
+    DROP TYPE IF EXISTS yulya.send_params;
+    DROP TABLE IF EXISTS yulya.calc_temperatures_correction;
+    DROP TABLE IF EXISTS yulya.const;
+    DROP TABLE IF EXISTS yulya.measure_settings;
+    DROP TABLE IF EXISTS yulya.measurment_baths;
+    DROP TABLE IF EXISTS yulya.measurment_input_params;
+    DROP TABLE IF EXISTS yulya.measurment_types;
+    DROP TABLE IF EXISTS yulya.military_ranks CASCADE;
+    DROP TABLE IF EXISTS yulya.employees CASCADE;
+    DROP SEQUENCE IF EXISTS yulya.employees_seq;
+    DROP SEQUENCE IF EXISTS yulya.measure_settings_seq;
+    DROP SEQUENCE IF EXISTS yulya.measurment_baths_seq;
+    DROP SEQUENCE IF EXISTS yulya.measurment_input_params_seq;
+    DROP SEQUENCE IF EXISTS yulya.measurment_types_seq;
+    DROP SEQUENCE IF EXISTS yulya.military_ranks_seq;
+
+end;
+
+/*
+ 2. Добавляем структуры данных 
+ ================================================
+ */
 
 -- Схема
 CREATE SCHEMA yulya;
@@ -64,27 +68,37 @@ ALTER TYPE yulya.send_params OWNER TO admin;
 -- Функции
 
 -- Классная работа
-CREATE FUNCTION yulya."fnHeaderGetPressure"() RETURNS numeric
-    LANGUAGE plpgsql
-    AS $$
-declare
-	var_result numeric;
-begin
-	return yulya."fnHeaderGetPressure"();
-end;
-$$;
 
-CREATE FUNCTION yulya."fnHeaderGetPressure"(pressure numeric) RETURNS numeric
+/*
+CREATE FUNCTION yulya."fnHeaderGetPressure"() 
+	RETURNS numeric
     LANGUAGE plpgsql
-    AS $$
-declare
-	var_result numeric;
+AS $$
+declare 
+	var_result numeric(8,2);
 begin
-	var_result:=1 + pressure;
+	var_result := yulya."fnHeaderGetPressureWithParametr"(700.00);
 	return var_result;
 end;
 $$;
 
+CREATE FUNCTION yulya."fnHeaderGetPressure"(pressure numeric) 
+	RETURNS numeric
+    LANGUAGE 'plpgsql'
+AS $$
+declare
+	var_result numeric(8,2);
+begin
+	var_result := pressure - 750;
+
+	if var_result < 0 then
+		var_result := var_result - 500;
+	end if;
+	
+	return abs(var_result);
+end;
+$$;
+*/
 
 -- Классная работа + доделать дома
 -- Метео-средний + интерполяция
@@ -127,24 +141,19 @@ end;
 $$;
 
 -- БББТТ
-CREATE FUNCTION yulya."getBBBTT"(measurement_id integer) 
+CREATE FUNCTION yulya."getBBBTT"(params yulya.send_params) 
 	RETURNS text
     LANGUAGE plpgsql
     AS $$
 declare
-	measure_temp numeric(8,2);
-	measure_pres numeric(8,2);
 	delta_temp integer;
 	delta_pres integer;
 	BBB text;
 	TT text;
 	var_result text;
 begin
-
-	select pressure into measure_pres from yulya.measurment_input_params where id = measurement_id;
-	select temperature into measure_temp from yulya.measurment_input_params where id = measurement_id;
-
-	delta_pres := measure_pres - 750;
+	delta_pres := params.pressure - 750;
+    delta_temp := params.temperature;
 
 	if delta_pres >= 0 then
 		BBB := case
@@ -158,9 +167,6 @@ begin
 			else abs(delta_pres)::text
 		end;
 	end if;
-
-	delta_temp := measure_temp;
-
 	TT := case
 		when length(abs(delta_temp)::text)=1 then '0' ||abs(delta_temp)
 		else abs(delta_temp)::text
@@ -172,112 +178,75 @@ begin
 end;
 $$;
 
--- Интерполяция (взяла на паре у Маши)
-CREATE FUNCTION yulya.interpolation() RETURNS numeric
-    LANGUAGE plpgsql
-    AS $$
-declare
-	var_interpolation record;
- 	var_result numeric(8,2) := 0;
-	var_min_temparure numeric(8,2);
-	var_max_temperature numeric(8,2);
-	var_denominator numeric(8,2);
+-- Интерполяция
+create function yulya."calculate_interpolation"(var_temperature integer)
+    returns numeric
+    language plpgsql
+    as $$
+declare 
+	var_interpolation interpolation_type;
+	var_result numeric(8,2) default 0;
+	var_min_temparure numeric(8,2) default 0;
+	var_max_temperature numeric(8,2) default 0;
+	var_denominator numeric(8,2) default 0;
 begin
-  RAISE NOTICE 'Расчет интерполяции для температуры %', p_temperature;
+	raisenotice 'Расчет интерполяции для температуры %', var_temperature;
 
-  -- Проверим, возможно температура совпадает со значением в справочнике
-  IF EXISTS (SELECT 1 FROM yulya.calc_temperatures_correction WHERE temperature = p_temperature) THEN
-    SELECT correction INTO var_result FROM yulya.calc_temperatures_correction WHERE temperature = p_temperature;
-  ELSE
-    -- Получим диапазон в котором работают поправки
-    SELECT min(temperature), max(temperature) INTO var_min_temparure, var_max_temperature
-    FROM yulya.calc_temperatures_correction;
+	if exists (select 1 from yulya.calc_temperatures_correction where temperature = var_temperature ) then
+	begin
+		select correction 
+		into var_result 
+		from yulya.calc_temperatures_correction
+		where temperature = var_temperature;
+	end;
+	else	
+	begin
+		select min(temperature), max(temperature) 
+		into var_min_temparure, var_max_temperature
+		from yulya.calc_temperatures_correction;
 
-    IF p_temperature < var_min_temparure OR p_temperature > var_max_temperature THEN
-      RAISE EXCEPTION 'Некорректно передан параметр! Невозможно рассчитать поправку. Значение должно укладываться в диаппазон: %, %',
-                       var_min_temparure, var_max_temperature;
-    END IF;
+		if var_temperature < var_min_temparure or var_temperature > var_max_temperature then
+			raise exception 'Некорректно передан параметр! Невозможно рассчитать поправку. Значение должно укладываться в диаппазон: %, %',
+				var_min_temparure, var_max_temperature;
+		end if;   
 
-    -- Получим граничные параметры
-    SELECT x0, y0, x1, y1
-    INTO var_interpolation.x0, var_interpolation.y0, var_interpolation.x1, var_interpolation.y1
-    FROM (
-      SELECT t1.temperature AS x0, t1.correction AS y0
-      FROM yulya.calc_temperatures_correction AS t1
-      WHERE t1.temperature <= p_temperature
-      ORDER BY t1.temperature DESC
-      LIMIT 1
-    ) AS leftPart
-    CROSS JOIN (
-      SELECT t1.temperature AS x1, t1.correction AS y1
-      FROM yulya.calc_temperatures_correction AS t1
-      WHERE t1.temperature >= p_temperature
-      ORDER BY t1.temperature
-      LIMIT 1
-    ) AS rightPart;
+		select x0, y0, x1, y1 
+		into var_interpolation.x0, var_interpolation.y0, var_interpolation.x1, var_interpolation.y1
+		from
+		(
+			select t1.temperature as x0, t1.correction as y0
+			from yulya.calc_temperatures_correction as t1
+			where t1.temperature <= var_temperature
+			order by t1.temperature desc
+			limit 1
+		) as leftPart
+		cross join
+		(
+			select t1.temperature as x1, t1.correction as y1
+			from yulya.calc_temperatures_correction as t1
+			where t1.temperature >= var_temperature
+			order by t1.temperature 
+			limit 1
+		) as rightPart;
+		
+		raisenotice 'Граничные значения %', var_interpolation;
 
-    RAISE NOTICE 'Граничные значения %', var_interpolation;
+		var_denominator := var_interpolation.x1 - var_interpolation.x0;
+		if var_denominator = 0.0 then
+			raise exception 'Деление на нуль. Возможно, некорректные данные в таблице с поправками!';
+		end if;
+		
+		var_result := (var_temperature - var_interpolation.x0) * (var_interpolation.y1 - var_interpolation.y0) / var_denominator + var_interpolation.y0;
+	
+	end;
+	end if;
 
-    -- Расчет поправки
-    var_denominator := var_interpolation.x1 - var_interpolation.x0;
-    IF var_denominator = 0.0 THEN
-      RAISE EXCEPTION 'Деление на нуль. Возможно, некорректные данные в таблице с поправками!';
-    END IF;
+	raisenotice 'Результат: %', var_result;
 
-    var_result := (p_temperature - var_interpolation.x0)*(var_interpolation.y1 - var_interpolation.y0) / var_denominator + var_interpolation.y0;
-  END IF;
-
-  RAISE NOTICE 'Результат: %', var_result;
-  RETURN var_result;
+	return var_result;
 end;
 $$;
 
-CREATE FUNCTION yulya.interpolation(temp numeric) RETURNS numeric
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    lower_temp DECIMAL;
-    upper_temp DECIMAL;
-    lower_corr DECIMAL;
-    upper_corr DECIMAL;
-    correction DECIMAL;
-BEGIN
-    -- Получаем нижнюю границу диапазона
-    SELECT temperature, correction INTO lower_temp, lower_corr
-    FROM temperature_corrections
-    WHERE temperature <= temp
-    ORDER BY temperature DESC
-    LIMIT 1;
-
-    -- Получаем верхнюю границу диапазона
-    SELECT temperature, correction INTO upper_temp, upper_corr
-    FROM temperature_corrections
-    WHERE temperature >= temp
-    ORDER BY temperature ASC
-    LIMIT 1;
-
-    -- Если температура ниже минимальной, вернуть первую поправку
-    IF lower_temp IS NULL THEN
-        RETURN upper_corr;
-    END IF;
-
-    -- Если температура выше максимальной, вернуть последнюю поправку
-    IF upper_temp IS NULL THEN
-        RETURN lower_corr;
-    END IF;
-
-    -- Если температура совпадает с одной из точек, вернуть точное значение
-    IF temp = lower_temp THEN
-        RETURN lower_corr;
-    ELSIF temp = upper_temp THEN
-        RETURN upper_corr;
-    ELSE
-        -- Линейная интерполяция между соседними значениями
-        correction := lower_corr + (upper_corr - lower_corr) * (temp - lower_temp) / (upper_temp - lower_temp);
-        RETURN correction;
-    END IF;
-END;
-$$;
 
 
 -- Новое задание 
@@ -329,10 +298,8 @@ ALTER FUNCTION yulya."fnHeaderGetPressure"() OWNER TO admin;
 ALTER FUNCTION yulya."fnHeaderGetPressure"(pressure numeric) OWNER TO admin;
 ALTER FUNCTION yulya."getDate"() OWNER TO admin;
 ALTER FUNCTION yulya."getHeight"(height integer) OWNER TO admin;
-ALTER FUNCTION yulya.interpolation() OWNER TO admin;
-ALTER FUNCTION yulya.interpolation(temp numeric) OWNER TO admin;
-ALTER FUNCTION yulya.new_data_type(temp numeric, pres numeric, wind numeric) OWNER TO admin;
-ALTER FUNCTION yulya."getBBBTT"(measurement_id integer) OWNER TO admin;
+ALTER FUNCTION yulya."calculate_interpolation"(var_temperature integer) OWNER TO admin;
+ALTER FUNCTION yulya."getBBBTT"(params yulya.send_params) OWNER TO admin;
 
 SET default_tablespace = '';
 SET default_table_access_method = heap;
@@ -417,12 +384,6 @@ insert into yulya.employees(id, name, birthday, military_rank_id)
 values
 (1, 'Кравцова Юлия Евгеньевна', '2004-02-27 10:05:00', 2);
 
-INSERT INTO yulya.measure_settings (id, measure_name, min_value, max_value, measure_unit) VALUES
-    (1, 'temperature', -58.00, 58.00, 'Celsius'),
-    (2, 'pressure', 500.00, 900.00, 'мм рт ст'),
-    (3, 'wind_direction', 0.00, 59.00, 'degrees');
-
-
 insert into yulya.measurment_baths (id, emploee_id, measurment_input_param_id, started)
 values
 (1,1,1, now());
@@ -500,7 +461,34 @@ ALTER SEQUENCE yulya.measurment_input_params_seq OWNER TO admin;
 ALTER SEQUENCE yulya.measurment_types_seq OWNER TO admin;
 ALTER SEQUENCE yulya.military_ranks_seq OWNER TO admin;
 
-select yulya."getDate"();
-select yulya."getHeight"(10);
-select yulya."getBBBTT"(1);
-select * from yulya.new_data_type(10,700,23);
+begin 
+	
+	alter table public.measurment_baths
+	add constraint emploee_id_fk 
+	foreign key (emploee_id)
+	references public.employees (id);
+	
+	alter table public.measurment_baths
+	add constraint measurment_input_param_id_fk 
+	foreign key(measurment_input_param_id)
+	references public.measurment_input_params(id);
+	
+	alter table public.measurment_input_params
+	add constraint measurment_type_id_fk
+	foreign key(measurment_type_id)
+	references public.measurment_types (id);
+	
+	alter table public.employees
+	add constraint military_rank_id_fk
+	foreign key(military_rank_id)
+	references public.military_ranks (id);
+
+end;
+
+-- select yulya."getDate"();
+-- select yulya."getHeight"(10);
+-- select * from yulya.new_data_type(10,700,23);
+-- select yulya."getBBBTT"((25, 760, 45)::yulya.send_params);
+
+end;
+end $$;
