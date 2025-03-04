@@ -513,6 +513,66 @@ if not exists (
 end;
 $$;
 
+drop procedure sp_calculate_wind_gun_corrections(input_params,jsonb);
+create or replace procedure public.sp_calculate_wind_gun_corrections(
+    in par_input public.input_params,
+    inout par_results jsonb
+)
+language 'plpgsql'
+as $body$
+declare
+    var_wind_correction_record record;  -- запись для хранения данных из таблицы
+    var_wind_speed integer[];  -- скорость ветра
+    var_wind_correction numeric(8,2);  -- поправка ветра
+begin
+    -- поиск данных в таблице calc_wind_correction по высоте и дальности сноса пуль
+    select wind_speed, wind_correction
+    into var_wind_speed, var_wind_correction
+    from public.calc_wind_correction
+    where height = par_input.height
+      and par_input.bullet_demolition_range = any(wind_drift_distance)
+    limit 1;
+
+    -- если данные не найдены значение 0
+    if not found then
+        var_wind_speed := 0;
+        var_wind_correction := 0;
+    end if;
+
+    par_results := jsonb_build_object(
+        'height', par_input.height,
+        'temperature', par_input.temperature,
+        'pressure', par_input.pressure,
+        'wind_direction', par_input.wind_direction,
+        'wind_speed', var_wind_speed,
+        'wind_correction', var_wind_correction
+    );
+
+    raise notice 'результаты расчета: %', par_results;
+end;
+$body$;
+
+do $$
+declare
+    input_data public.input_params;
+    results jsonb;
+begin
+    input_data.height := 2000.0;
+    input_data.temperature := 23.5;
+    input_data.pressure := 750.0;
+    input_data.wind_direction := 180.0;
+    input_data.wind_speed := 5.0;
+    input_data.bullet_demolition_range := 100.0;
+
+    call public.sp_calculate_wind_gun_corrections(
+        input_data,
+        results
+    );
+
+    raise notice 'результаты расчета: %', results;
+end $$;
+
+
 CREATE SEQUENCE public.calc_header_correction_seq
     START WITH 1
     INCREMENT BY 1
@@ -750,3 +810,201 @@ INSERT INTO public.measurment_types (id, short_name, description) VALUES
 INSERT INTO public.military_ranks (id, description) VALUES
 (1, 'Рядовой'),
 (2, 'Лейтенант');
+
+
+drop table if exists public.calc_wind_correction;
+drop sequence if exists public.calc_wind_correction_seq;
+
+create sequence public.calc_wind_correction_seq
+	start with 1
+	increment by 1
+	no minvalue
+	no maxvalue
+	cache 1;
+
+create table public.calc_wind_correction(
+	id integer default nextval('public.calc_wind_correction_seq'::regclass) not null,
+	height integer not null,
+	wind_drift_distance integer[] not null,
+	wind_speed integer[],
+	wind_correction numeric(8,2)
+);
+
+insert into public.calc_wind_correction(height, wind_drift_distance, wind_speed, wind_correction)
+VALUES 
+    (200, 
+	array[40,50,60,70,80,90,100,110,120,130,140,150],
+	array[3,4,5,6,7,7,8,9,10,11,12,12],
+	0.00),
+	(400, 
+	array[40,50,60,70,80,90,100,110,120,130,140,150],
+	array[4,5,6,7,8,9,10,11,12,13,14,15],
+	1.00),
+	(800, 
+	array[40,50,60,70,80,90,100,110,120,130,140,150],
+	array[4,5,6,7,8,9,10,11,13,14,15,16],
+	2.00),
+	(1200, 
+	array[40,50,60,70,80,90,100,110,120,130,140,150],
+	array[4,5,7,8,8,9,11,12,13,15,15,16],
+	2.00),
+	(1600, 
+	array[40,50,60,70,80,90,100,110,120,130,140,150],
+	array[4,6,7,8,9,10,11,13,14,15,17,17],
+	3.00),
+	(2000, 
+	array[40,50,60,70,80,90,100,110,120,130,140,150],
+	array[4,6,7,8,9,10,11,13,14,16,17,18],
+	3.00),
+	(2400, 
+	array[40,50,60,70,80,90,100,110,120,130,140,150],
+	array[4,6,8,9,9,10,12,14,15,16,18,19],
+	3.00),
+	(3000, 
+	array[40,50,60,70,80,90,100,110,120,130,140,150],
+	array[5,6,8,9,10,11,12,14,15,17,18,19],
+	4.00),
+	(4000, 
+	array[40,50,60,70,80,90,100,110,120,130,140,150],
+	array[5,6,8,9,10,11,12,14,16,18,19,20],
+	4.00);
+
+select * from public.calc_wind_correction;
+
+DO $$
+BEGIN
+    RAISE NOTICE 'json %', 
+    (SELECT json_agg(row_to_json(calc_wind_correction))
+     FROM public.calc_wind_correction);
+END $$;
+
+
+-- индексы
+
+drop index if exists ix_measurment_baths_emploee_id;
+drop index if exists ix_calc_header_correction_measurment_type_id;
+drop index if exists ix_calc_height_correction_measurment_type_id;
+drop index if exists ix_calc_temperature_height_correction_calc_height_id;
+drop index if exists ix_calc_temperature_height_correction_calc_temperature_header_id;
+drop index if exists ix_measurment_input_params_measurment_type_id;
+drop index if exists ix_measurment_input_params_bullet_demolition_range;
+drop index if exists ix_employees_military_rank_id;
+drop index if exists ix_measurment_baths_measurment_input_param_id;
+drop index if exists ix_measurment_settings_key;
+drop index if exists ix_measurment_types_short_name;
+drop index if exists ix_military_ranks_description;
+
+
+create index if not exists ix_measurment_baths_emploee_id
+    on public.measurment_baths (emploee_id);
+
+create index if not exists ix_calc_header_correction_measurment_type_id
+    on public.calc_header_correction (measurment_type_id);
+
+create index if not exists ix_calc_height_correction_measurment_type_id
+    on public.calc_height_correction (measurment_type_id);
+
+create index if not exists ix_calc_temperature_height_correction_calc_height_id
+    on public.calc_temperature_height_correction (calc_height_id);
+
+create index if not exists ix_calc_temperature_height_correction_calc_temperature_header_id
+    on public.calc_temperature_height_correction (calc_temperature_header_id);
+
+create index if not exists ix_measurment_input_params_measurment_type_id
+    on public.measurment_input_params (measurment_type_id);
+
+create index if not exists ix_measurment_input_params_bullet_demolition_range
+    on public.measurment_input_params (bullet_demolition_range);
+
+create index if not exists ix_employees_military_rank_id
+    on public.employees (military_rank_id);
+
+create index if not exists ix_measurment_baths_measurment_input_param_id
+    on public.measurment_baths (measurment_input_param_id);
+
+create index if not exists ix_measurment_settings_key
+    on public.measurment_settings (key);
+
+create index if not exists ix_measurment_types_short_name
+    on public.measurment_types (short_name);
+
+create index if not exists ix_military_ranks_description
+    on public.military_ranks (description);
+
+
+-- view
+
+drop view if exists public.measument_fails_report;
+
+-- Запрос с прошлого задания  оформить в виде представления (View и CTE)
+-- ФИО  | Должность | Кол-во измерений | Количество ошибочных данных |
+create view public.measument_fails_report as
+with 
+measurement_quantity as (
+    select emploee_id, count(*) as measurement_quantity
+    from public.measurment_input_params as t1
+    inner join public.measurment_baths as t2 on t2.measurment_input_param_id = t1.id
+    group by emploee_id
+),
+fails as (
+    select
+        emploee_id,
+        count(*) as fails
+    from public.measurment_input_params as t1
+    inner join public.measurment_baths as t2 on t2.measurment_input_param_id = t1.id
+    where 
+        (public.fn_check_input_params(height, temperature, pressure, wind_direction, wind_speed, bullet_demolition_range)::public.check_result).is_check = false
+    group by emploee_id
+)
+select
+    t1.name as username, 
+    t2.description as position, 
+    coalesce(tt1.measurement_quantity, 0) as measurement_quantity, 
+    coalesce(tt2.fails, 0) as fails
+from public.employees as t1
+inner join public.military_ranks as t2 on t1.military_rank_id = t2.id
+left join measurement_quantity as tt1 on tt1.emploee_id = t1.id
+left join fails as tt2 on tt2.emploee_id = t1.id
+order by fails desc;
+
+select * from public.measument_fails_report;
+
+drop view if exists public.effective_measurement_height_report;
+create view public.effective_measurement_height_report as
+with 
+measurement_stats as (
+    select 
+        emploee_id, 
+        min(height) as min_height,
+        max(height) as max_height,
+        count(*) as measurements,
+        sum(
+            case 
+                when (public.fn_check_input_params(height, temperature, pressure, 
+                                                  wind_direction, wind_speed, 
+                                                  bullet_demolition_range)::public.check_result).is_check = false 
+                then 1 
+                else 0 
+            end
+        ) as fails
+    from public.measurment_input_params as t1
+    inner join public.measurment_baths as t2 on t2.measurment_input_param_id = t1.id
+    group by emploee_id
+)
+select
+    t1.name as username, -- ФИО пользователя
+    t2.description as position, -- Звание
+    tt.min_height, -- Мин. высота метеопоста
+    tt.max_height, -- Макс. высота метепоста
+    tt.measurements, -- Всего измерений
+    tt.fails -- Из них ошибочны
+from measurement_stats as tt
+inner join public.employees as t1 on tt.emploee_id = t1.id
+inner join public.military_ranks as t2 on t1.military_rank_id = t2.id
+-- Необходмо вывести список пользователей у которых меньше 10 ошибок в наборе данных, которые делали не менее 5- ти измерения
+-- Таких не существует, поэтому закомментировано
+-- where tt.fails < 10 and tt.measurements >= 5
+order by tt.fails asc;
+
+
+select * from public.effective_measurement_height_report;
