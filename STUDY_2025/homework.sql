@@ -1005,6 +1005,184 @@ order by tt.fails asc;
 
 select * from public.effective_measurement_height_report;
 
+-- Добавим таблицы, типы из кода преподавателя
+/*
+ 3. Подготовка расчетных структур
+ ==========================================
+ */
+drop type  if exists interpolation_type cascade;
+drop type if exists input_params cascade;
+drop type if exists check_result cascade;
+drop type if exists temperature_correction cascade;
+drop type if exists wind_direction_correction cascade;
+drop table if exists calc_temperature_correction;
+drop table if exists calc_header_correction;
+drop table if exists calc_temperature_height_correction;
+drop table if exists calc_height_correction;
+drop table if exists calc_wind_speed_height_correction;
+drop sequence if exists calc_wind_speed_height_correction_seq;
+drop sequence if exists calc_temperature_height_correction_seq;
+drop sequence if exists calc_height_correction_seq;
+drop sequence if exists calc_header_correction_seq;
+drop index if exists ix_calc_header_correction_header_type;
+drop procedure if exists public.sp_calc_wind_speed_deviation;
+
+create table calc_temperature_correction
+(
+   temperature numeric(8,2) not null primary key,
+   correction numeric(8,2) not null
+);
+
+insert into public.calc_temperature_correction(temperature, correction)
+Values(0, 0.5),(5, 0.5),(10, 1), (20,1), (25, 2), (30, 3.5), (40, 4.5);
+
+create type interpolation_type as
+(
+	x0 numeric(8,2),
+	x1 numeric(8,2),
+	y0 numeric(8,2),
+	y1 numeric(8,2)
+);
+
+-- Тип для входных параметров
+create type input_params as
+(
+	height numeric(8,2),
+	temperature numeric(8,2),
+	pressure numeric(8,2),
+	wind_direction numeric(8,2),
+	wind_speed numeric(8,2),
+	bullet_demolition_range numeric(8,2)
+);
+
+-- Тип с результатами проверки
+create type check_result as
+(
+	is_check boolean,
+	error_message text,
+	params input_params
+);
+
+-- Результат расчета коррекций для температуры по высоте
+create type temperature_correction as
+(
+	calc_height_id integer,
+	height integer,
+	-- Приращение по температуре
+	temperature_deviation integer
+);
+
+-- Результат расчета скорости среднего ветра и приращение среднего ветра
+create type wind_direction_correction as
+(
+	calc_height_id integer,
+	height integer,
+	-- Приращение по скорости ветра
+	wind_speed_deviation integer,
+	-- Приращение среднего ветра
+	wind_deviation integer
+);
+
+
+-- Таблица заголовков к поправочных таблицам
+create sequence calc_header_correction_seq;
+create table calc_header_correction
+(
+	id integer not null primary key default nextval('public.calc_header_correction_seq'),
+	measurment_type_id integer not null,
+	header varchar(100) not null,
+	description text not null,
+	values integer[] not null
+);
+
+-- Добавим уникальный индекс для отсечки ошибок
+create unique index ix_calc_header_correction_header_type on calc_header_correction(measurment_type_id, header);
+
+-- Добавим заголовки
+insert into calc_header_correction(measurment_type_id, header, description, values) 
+values (1, 'table2', 'Заголовок для Таблицы № 2 (ДМК)', array[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50]),
+       (2, 'table2','Заголовок для Таблицы № 2 (ВР)', array[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50]),
+	   (2, 'table3', 'Заголовок для Таблицы № 3 (ВР)', array[40,50,60,70,80,90,100,110,120,130,140,150]);
+
+
+-- Таблица 2 список высот в разрезе типа оборудования
+create sequence calc_height_correction_seq;
+create table calc_height_correction
+(
+	id integer primary key not null default nextval('public.calc_height_correction_seq'),
+	height integer not null,
+	measurment_type_id integer not null
+);
+
+insert into calc_height_correction(height, measurment_type_id)
+values(200,1),(400,1),(800,1),(1200,1),(1600,1),(2000,1),(2400,1),(3000,1),(4000,1),
+	  (200,2),(400,2),(800,2),(1200,2),(1600,2),(2000,2),(2400,2),(3000,2),(4000,2);
+
+
+-- Таблица 2 набор корректировок
+create sequence calc_temperature_height_correction_seq;
+create table calc_temperature_height_correction
+(
+	id integer primary key not null default nextval('public.calc_temperature_height_correction_seq'),
+	calc_height_id integer not null,
+	calc_temperature_header_id integer not null,
+	positive_values numeric[],
+	negative_values numeric[]
+);
+
+-- Данные для ветрового ружья
+insert into calc_temperature_height_correction(calc_height_id, calc_temperature_header_id, positive_values, negative_values)
+values
+(10,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[ -1, -2, -3, -4, -5, -6, -7, -8, -8, -9, -20, -29, -39, -49]), --200
+(11,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -3, -4, -5, -6, -6, -7, -8, -9, -19, -29, -38, -48]), --400
+(12,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -3, -4, -5, -6, -6, -7, -7, -8, -18, -28, -37, -46]), --800
+(13,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -3, -4, -4, -5, -5, -6, -7, -8, -17, -26, -35, -44]), --1200
+(14,1,array[ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -3, -3, -4, -4, -5, -6, -7, -7, -17, -25, -34, -42]), --1600
+(15,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -3, -3, -4, -4, -5, -6, -6, -7, -16, -24, -32, -40]), --2000
+(16,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -2, -3, -4, -4, -5, -5, -6, -7, -15, -23, -31, -38]), --2400
+(17,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -2, -3, -4, -4, -4, -5, -5, -6, -15, -22, -30, -37]), --3000
+(18,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[ -1, -2, -2, -3, -4, -4, -4, -4, -5, -6, -14, -20, -27, -34]); --4000
+
+
+
+-- Данные для ДМК
+insert into calc_temperature_height_correction(calc_height_id, calc_temperature_header_id, positive_values, negative_values)
+values
+(1,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[ -1, -2, -3, -4, -5, -6, -7, -8, -8, -9, -20, -29, -39, -49]), --200
+(2,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -3, -4, -5, -6, -6, -7, -8, -9, -19, -29, -38, -48]), --400
+(3,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -3, -4, -5, -6, -6, -7, -7, -8, -18, -28, -37, -46]), --800
+(4,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -3, -4, -4, -5, -5, -6, -7, -8, -17, -26, -35, -44]), --1200
+(5,1,array[ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -3, -3, -4, -4, -5, -6, -7, -7, -17, -25, -34, -42]), --1600
+(6,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -3, -3, -4, -4, -5, -6, -6, -7, -16, -24, -32, -40]), --2000
+(7,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -2, -3, -4, -4, -5, -5, -6, -7, -15, -23, -31, -38]), --2400
+(8,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -2, -3, -4, -4, -4, -5, -5, -6, -15, -22, -30, -37]), --3000
+(9,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[ -1, -2, -2, -3, -4, -4, -4, -4, -5, -6, -14, -20, -27, -34]); --4000
+
+
+-- Таблица 3 корректировка сноса пуль
+-- Для расчета приращение среднего ветра относительно направления приземного ветра
+create sequence calc_wind_speed_height_correction_seq;
+create table calc_wind_speed_height_correction
+(
+	id integer not null primary key default nextval('public.calc_wind_speed_height_correction_seq'),
+	calc_height_id integer not null,
+	values integer[] not null,
+	delta integer not null
+);
+
+-- Для ветрового ружья
+insert into calc_wind_speed_height_correction(calc_height_id, values, delta)
+values
+(10, array[3, 4, 5, 6, 7, 7, 8, 9, 10, 11, 12, 12], 0),	-- 200
+(11, array[4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], 1),-- 400
+(12, array[4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16], 2), -- 800
+(13, array[4, 5, 7, 8, 8, 9, 11, 12, 13, 15, 15, 16], 2), -- 1200
+(14, array[4, 6, 7, 8, 9, 10, 11, 13, 14, 15, 17, 17], 3), -- 1600
+(15, array[4, 6, 7, 8, 9, 10, 11, 13, 14, 16, 17, 18], 3), -- 2000
+(16, array[4, 6, 8, 9, 9, 10, 12, 14, 15, 16, 18, 19], 3), -- 2400
+(17, array[5, 6, 8, 9, 10, 11, 12, 14, 15, 17, 18, 19], 4), -- 3000
+(18, array[5, 6, 8, 9, 10, 11, 12, 14, 16, 18, 19, 20],4) -- 4000
+;
 
 
 -- Процедура для расчета скорости среднего ветра и направления среднего ветра
