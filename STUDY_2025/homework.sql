@@ -94,7 +94,9 @@ create type public.wind_direction_correction as
 	-- Приращение по скорости ветра
 	wind_speed_deviation integer,
 	-- Приращение среднего ветра
-	wind_deviation integer
+	wind_deviation integer,
+	-- Приращение по температуре
+	temperature_deviation integer
 );
 
 CREATE FUNCTION public.fn_calc_header_meteo_avg(par_params public.input_params) RETURNS text
@@ -1035,6 +1037,7 @@ declare
 	var_header_index integer;
 	var_table integer[];
 	var_deviation integer;
+	var_temperature_deviation integer;
 	var_table_row text;
 begin
 
@@ -1070,24 +1073,37 @@ begin
 		raise exception 'Невозможно произвести расчет по высоте. Некорректные исходные данные или настройки';
 	end if;			
 
-	raise notice '| Высота   | Поправка  |';
-	raise notice '|----------|-----------|';
+	raise notice '| Высота   | Температура | Скорость ветра | Напрвление ветра | Поправка |';
+	raise notice '|----------|-------------|----------------|------------------|----------|';
 	
 	for var_row in
-		select t1.height, t2.* from calc_height_correction as t1
+		select t1.height, t2.*, t3.positive_values, t3.negative_values from calc_height_correction as t1
 		inner join public.calc_wind_speed_height_correction as t2
-		on t2.calc_height_id = t1.id
+			on t2.calc_height_id = t1.id
+		inner join calc_temperature_height_correction as t3
+			on t3.calc_height_id = t1.id
 		where  
 			t1.measurment_type_id = par_measurement_type_id loop
 
 		-- Получаем индекс
 		var_header_index := abs(var_index % 10);
-		var_table := var_row.values;
+		-- Выбираем отрицательные или положительные значения нам нужны
+		var_table := var_row.positive_values;
+		--var_table := var_row.negative_values; 
+
+		-- Поправка на отклонение температуры воздуха
+		var_temperature_deviation := var_row.positive_values[var_header_index];
+		--var_temperature_deviation := var_row.negative_values[var_header_index];
+
 
 		-- Поправка на скорость среднего ветра
 		var_deviation:= var_table[ var_header_index  ];
 
-		select '|' || lpad(var_row.height::text, 10, ' ') || '|' || lpad(var_deviation::text, 11,' ') || '|'
+		select '|' || lpad(var_row.height::text, 10, ' ') || '|' || 
+					  lpad(var_temperature_deviation::text, 13, ' ') || '|' ||
+					  lpad(var_deviation::text, 16,' ') || '|' ||
+					  lpad(var_row.delta::text, 18, ' ') || '|' ||
+					  lpad((var_deviation + var_row.delta)::text, 10, ' ') || '|'
 		into
 			var_table_row;
 				
@@ -1101,11 +1117,23 @@ begin
 
 		-- Приращение среднего ветра относительно направления приземного ветра
 		var_correction.wind_deviation = var_row.delta;
+
+		-- Температура
+		var_correction.temperature_deviation := var_temperature_deviation;
 		
 		par_corrections := array_append(par_corrections, var_correction);
 	end loop;	
 
-	raise notice '|----------|-----------|';
+	raise notice '|----------|-------------|----------------|------------------|----------|';
 
 end;
 $body$;
+
+DO $$ 
+DECLARE 
+    corrections wind_direction_correction[] := '{}'; -- Пустой массив
+BEGIN
+    CALL public.sp_calc_wind_speed_deviation(2.00, 2, corrections);
+    -- Вывести результат
+    RAISE NOTICE 'Result: %', corrections;
+END $$;
