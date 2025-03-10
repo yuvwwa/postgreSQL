@@ -1004,3 +1004,95 @@ order by tt.fails asc;
 
 
 select * from public.effective_measurement_height_report;
+
+
+
+-- Процедура для расчета скорости среднего ветра и направления среднего ветра
+create or replace procedure public.sp_calc_wind_speed_deviation(
+	IN par_bullet_demolition_range numeric,
+	IN par_measurement_type_id integer,
+	INOUT par_corrections wind_direction_correction[])
+language 'plpgsql'
+as $body$
+declare
+	var_row record;
+	var_index integer;
+	var_correction wind_direction_correction;
+	var_header_correction integer[];
+	var_header_index integer;
+	var_table integer[];
+	var_deviation integer;
+	var_table_row text;
+begin
+
+	if coalesce(par_bullet_demolition_range, -1) < 0 then
+		raise exception 'Некорректно переданы параметры! Значение par_bullet_demolition_range %', par_bullet_demolition_range; 
+	end if;
+	
+	if not exists ( select 1 from public.calc_height_correction 
+			where measurment_type_id = par_measurement_type_id) then
+
+		raise exception 'Для устройства с кодом % не найдены значения высот в таблице calc_height_correction!', par_measurement_type_id;
+	end if;	
+
+	-- Получаем индекс корректировки
+	var_index := (par_bullet_demolition_range / 10)::integer - 4;
+	if var_index < 0 then
+		var_index := 1;
+	end if;	
+
+
+	-- Получаем заголовок 
+	var_header_correction := (select values from public.calc_header_correction
+				where 
+					header = 'table3'
+					and measurment_type_id  = par_measurement_type_id );
+
+	-- Проверяем данные
+	if array_length(var_header_correction, 1) = 0 then
+		raise exception 'Невозможно произвести расчет по высоте. Некорректные исходные данные или настройки';
+	end if;
+
+	if array_length(var_header_correction, 1) < var_index then
+		raise exception 'Невозможно произвести расчет по высоте. Некорректные исходные данные или настройки';
+	end if;			
+
+	raise notice '| Высота   | Поправка  |';
+	raise notice '|----------|-----------|';
+	
+	for var_row in
+		select t1.height, t2.* from calc_height_correction as t1
+		inner join public.calc_wind_speed_height_correction as t2
+		on t2.calc_height_id = t1.id
+		where  
+			t1.measurment_type_id = par_measurement_type_id loop
+
+		-- Получаем индекс
+		var_header_index := abs(var_index % 10);
+		var_table := var_row.values;
+
+		-- Поправка на скорость среднего ветра
+		var_deviation:= var_table[ var_header_index  ];
+
+		select '|' || lpad(var_row.height::text, 10, ' ') || '|' || lpad(var_deviation::text, 11,' ') || '|'
+		into
+			var_table_row;
+				
+		raise notice '%', var_table_row;
+
+		var_correction.calc_height_id := var_row.calc_height_id;
+		var_correction.height := var_row.height;
+
+		-- Скорость среднего ветра
+		var_correction.wind_speed_deviation := var_deviation;
+
+		-- Приращение среднего ветра относительно направления приземного ветра
+		var_correction.wind_deviation = var_row.delta;
+		
+		par_corrections := array_append(par_corrections, var_correction);
+	end loop;	
+
+	raise notice '|----------|-----------|';
+
+end;
+$body$;
