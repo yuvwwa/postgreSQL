@@ -94,7 +94,9 @@ create type public.wind_direction_correction as
 	-- Приращение по скорости ветра
 	wind_speed_deviation integer,
 	-- Приращение среднего ветра
-	wind_deviation integer
+	wind_deviation integer,
+	-- Приращение по температуре
+	temperature_deviation integer
 );
 
 CREATE FUNCTION public.fn_calc_header_meteo_avg(par_params public.input_params) RETURNS text
@@ -1021,8 +1023,9 @@ select * from public.effective_measurement_height_report;
 
 
 -- Процедура для расчета скорости среднего ветра и направления среднего ветра
-create or replace procedure public.sp_calc_wind_speed_deviation(
+create or replace procedure public.sp_calc_wind_temp_speed_deviation(
 	IN par_bullet_demolition_range numeric,
+	in par_temperature_correction numeric(8,2),
 	IN par_measurement_type_id integer,
 	INOUT par_corrections wind_direction_correction[])
 language 'plpgsql'
@@ -1035,7 +1038,14 @@ declare
 	var_header_index integer;
 	var_table integer[];
 	var_deviation integer;
+	var_temperature_deviation integer;
 	var_table_row text;
+	var_temp_index integer;
+	var_temp_header_correction integer[];
+	var_temp_right_index integer;
+    var_temp_left_index integer;
+    var_temp_header_index integer;
+	var_temp_table integer[];
 begin
 
 	if coalesce(par_bullet_demolition_range, -1) < 0 then
@@ -1048,46 +1058,90 @@ begin
 		raise exception 'Для устройства с кодом % не найдены значения высот в таблице calc_height_correction!', par_measurement_type_id;
 	end if;	
 
-	-- Получаем индекс корректировки
+	-- Получаем индекс корректировки для скорости ветра (Таблица 3)
 	var_index := (par_bullet_demolition_range / 10)::integer - 4;
 	if var_index < 0 then
 		var_index := 1;
 	end if;	
 
+	-- Получаем индекс корректировки для температуры (Таблица 2)
+	var_temp_index := par_temperature_correction::integer;
 
-	-- Получаем заголовок 
+	-- Получаем заголовок для скорости ветра (Таблица 3)
 	var_header_correction := (select values from public.calc_header_correction
 				where 
 					header = 'table3'
 					and measurment_type_id  = par_measurement_type_id );
 
-	-- Проверяем данные
+	-- Проверяем данные для скорости ветра
 	if array_length(var_header_correction, 1) = 0 then
-		raise exception 'Невозможно произвести расчет по высоте. Некорректные исходные данные или настройки';
+		raise exception 'Невозможно произвести расчет по высоте. Некорректные исходные данные или настройки для таблицы 3';
 	end if;
 
 	if array_length(var_header_correction, 1) < var_index then
-		raise exception 'Невозможно произвести расчет по высоте. Некорректные исходные данные или настройки';
+		raise exception 'Невозможно произвести расчет по высоте. Некорректные исходные данные или настройки для таблицы 3';
 	end if;			
 
-	raise notice '| Высота   | Поправка  |';
-	raise notice '|----------|-----------|';
+	raise notice '| Высота   | Температура | Скорость ветра | Напрвление ветра | Поправка |';
+	raise notice '|----------|-------------|----------------|------------------|----------|';
 	
 	for var_row in
-		select t1.height, t2.* from calc_height_correction as t1
+		select t1.height, t2.*,t3.calc_temperature_header_id, t3.positive_values, t3.negative_values 
+		from calc_height_correction as t1
 		inner join public.calc_wind_speed_height_correction as t2
-		on t2.calc_height_id = t1.id
+			on t2.calc_height_id = t1.id
+		inner join calc_temperature_height_correction as t3
+			on t3.calc_height_id = t1.id
 		where  
 			t1.measurment_type_id = par_measurement_type_id loop
 
-		-- Получаем индекс
-		var_header_index := abs(var_index % 10);
+		-- table3
+		var_header_index := abs(var_index%10);
 		var_table := var_row.values;
+		var_deviation :=var_table[var_header_index];
 
-		-- Поправка на скорость среднего ветра
-		var_deviation:= var_table[ var_header_index  ];
+		-- table2
+		var_temp_header_correction := (select values from public.calc_header_correction
+										where 
+										header = 'table2'
+										and id = var_row.calc_temperature_header_id);
 
-		select '|' || lpad(var_row.height::text, 10, ' ') || '|' || lpad(var_deviation::text, 11,' ') || '|'
+		-- Проверка данных для температуры
+		if array_length(var_temp_header_correction, 1) = 0 then
+			raise exception 'Невозможно произвести расчет по высоте %. Некорректные исходные данные или настройки для таблицы 2', var_row.height;
+		end if;
+
+		if array_length(var_temp_header_correction, 1) < var_temp_index then
+			raise exception 'Невозможно произвести расчет по высоте %. Некорректные исходные данные или настройки для таблицы 2', var_row.height;
+		end if;	
+
+		-- Получаем левый и правый индекс для температуры ( интерполяция )
+		var_temp_right_index := abs(var_temp_index % 10);
+		var_temp_header_index := abs(var_temp_index) - var_temp_right_index;
+
+		-- Получаем корректировки для температуры ( положительное/отрицательное )
+		if par_temperature_correction >= 0 then
+			var_temp_table := var_row.positive_values;
+		else
+			var_temp_table := var_row.negative_values;
+		end if;
+
+		if var_temp_header_index = 0 then
+			var_temp_header_index := 1;
+		end if;
+
+		var_temp_left_index := var_temp_header_correction[var_temp_header_index];
+        if var_temp_left_index = 0 then
+            var_temp_left_index := 1;
+        end if;
+
+		var_temperature_deviation := var_temp_table[var_temp_left_index] + var_temp_table[var_temp_right_index];
+
+		select '|' || lpad(var_row.height::text, 10, ' ') || '|' || 
+					  lpad(var_temperature_deviation::text, 13, ' ') || '|' ||
+					  lpad(var_deviation::text, 16,' ') || '|' ||
+					  lpad(var_row.delta::text, 18, ' ') || '|' ||
+					  lpad((var_deviation + var_row.delta)::text, 10, ' ') || '|'
 		into
 			var_table_row;
 				
@@ -1101,11 +1155,23 @@ begin
 
 		-- Приращение среднего ветра относительно направления приземного ветра
 		var_correction.wind_deviation = var_row.delta;
+
+		-- Температура
+		var_correction.temperature_deviation := var_temperature_deviation;
 		
 		par_corrections := array_append(par_corrections, var_correction);
 	end loop;	
 
-	raise notice '|----------|-----------|';
+	raise notice '|----------|-------------|----------------|------------------|----------|';
 
 end;
 $body$;
+
+do $$
+declare
+	corrections wind_direction_correction[] := '{}';
+begin
+	-- Дальность сноса пуль, температура, тип измерения, поправка
+	call public.sp_calc_wind_temp_speed_deviation(2.00, 7.00, 2, corrections);
+	raise notice 'Result: %', corrections;
+end $$;
